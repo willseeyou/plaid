@@ -18,19 +18,19 @@ package io.plaidapp.ui;
 
 import android.app.Activity;
 import android.app.ActivityOptions;
-import android.app.SharedElementCallback;
 import android.content.Intent;
 import android.content.res.Resources;
+import android.graphics.drawable.AnimatedVectorDrawable;
 import android.os.Bundle;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.widget.GridLayoutManager;
 import android.support.v7.widget.RecyclerView;
 import android.text.TextUtils;
 import android.transition.TransitionManager;
-import android.util.TypedValue;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
@@ -48,9 +48,9 @@ import butterknife.ButterKnife;
 import butterknife.OnClick;
 import io.plaidapp.R;
 import io.plaidapp.data.PlaidItem;
-import io.plaidapp.data.PlayerDataManager;
 import io.plaidapp.data.api.AuthInterceptor;
 import io.plaidapp.data.api.dribbble.DribbbleService;
+import io.plaidapp.data.api.dribbble.PlayerShotsDataManager;
 import io.plaidapp.data.api.dribbble.model.User;
 import io.plaidapp.data.pocket.PocketUtils;
 import io.plaidapp.data.prefs.DribbblePrefs;
@@ -78,7 +78,7 @@ public class PlayerActivity extends Activity {
 
     private User player;
     private CircleTransform circleTransform;
-    private PlayerDataManager dataManager;
+    private PlayerShotsDataManager dataManager;
     private FeedAdapter adapter;
     private GridLayoutManager layoutManager;
     private ElasticDragDismissFrameLayout.SystemChromeFader chromeFader;
@@ -104,18 +104,12 @@ public class PlayerActivity extends Activity {
         setContentView(R.layout.activity_dribbble_player);
         ButterKnife.bind(this);
         circleTransform = new CircleTransform(this);
-        chromeFader = new ElasticDragDismissFrameLayout.SystemChromeFader(getWindow()) {
-            @Override
-            public void onDragDismissed() {
-                finishAfterTransition();
-            }
-        };
+        chromeFader = new ElasticDragDismissFrameLayout.SystemChromeFader(this);
 
         final Intent intent = getIntent();
         if (intent.hasExtra(EXTRA_PLAYER)) {
             player = intent.getParcelableExtra(EXTRA_PLAYER);
             bindPlayer();
-            setupSharedEnter();
         } else if (intent.hasExtra(EXTRA_PLAYER_NAME)) {
             String name = intent.getStringExtra(EXTRA_PLAYER_NAME);
             playerName.setText(name);
@@ -129,6 +123,25 @@ public class PlayerActivity extends Activity {
         } else if (intent.getData() != null) {
             // todo support url intents
         }
+
+        // setup immersive mode i.e. draw behind the system chrome & adjust insets
+        draggableFrame.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        draggableFrame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                ((ViewGroup.MarginLayoutParams) draggableFrame.getLayoutParams()).rightMargin
+                        += insets.getSystemWindowInsetRight(); // landscape
+                ((ViewGroup.MarginLayoutParams) avatar.getLayoutParams()).topMargin
+                    += insets.getSystemWindowInsetTop();
+                ViewUtils.setPaddingTop(playerDescription, insets.getSystemWindowInsetTop());
+                ViewUtils.setPaddingBottom(shots, insets.getSystemWindowInsetBottom());
+                // clear this listener so insets aren't re-applied
+                draggableFrame.setOnApplyWindowInsetsListener(null);
+                return insets;
+            }
+        });
     }
 
     @Override
@@ -161,13 +174,16 @@ public class PlayerActivity extends Activity {
 
         shotCount.setText(res.getQuantityString(R.plurals.shots, player.shots_count,
                 nf.format(player.shots_count)));
-        followerCount = player.followers_count;
-        setFollowerCount();
+        if (player.shots_count == 0) {
+            shotCount.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                    null, getDrawable(R.drawable.avd_no_shots), null, null);
+        }
+        setFollowerCount(player.followers_count);
         likesCount.setText(res.getQuantityString(R.plurals.likes, player.likes_count,
                 nf.format(player.likes_count)));
 
         // load the users shots
-        dataManager = new PlayerDataManager(this, player) {
+        dataManager = new PlayerShotsDataManager(this, player) {
             @Override
             public void onDataLoaded(List<? extends PlaidItem> data) {
                 if (data != null && data.size() > 0) {
@@ -179,7 +195,7 @@ public class PlayerActivity extends Activity {
                 }
             }
         };
-        adapter = new FeedAdapter(this, dataManager, columns, PocketUtils.isPocketInstalled(this), false);
+        adapter = new FeedAdapter(this, dataManager, columns, PocketUtils.isPocketInstalled(this));
         shots.setAdapter(adapter);
         shots.setVisibility(View.VISIBLE);
         layoutManager = new GridLayoutManager(this, columns);
@@ -193,7 +209,7 @@ public class PlayerActivity extends Activity {
         shots.addOnScrollListener(new InfiniteScrollListener(layoutManager, dataManager) {
             @Override
             public void onLoadMore() {
-                dataManager.loadMore();
+                dataManager.loadData();
             }
         });
         shots.setHasFixedSize(true);
@@ -204,9 +220,16 @@ public class PlayerActivity extends Activity {
             @Override
             public boolean onTouch(View v, MotionEvent event) {
                 final int firstVisible = layoutManager.findFirstVisibleItemPosition();
-                if (firstVisible != 0) return false;
+                if (firstVisible > 0) return false;
 
-                final int firstTop = shots.findViewHolderForAdapterPosition(0).itemView.getTop();
+                // if no data loaded then pass through
+                if (adapter.getDataItemCount() == 0) {
+                    return playerDescription.dispatchTouchEvent(event);
+                }
+
+                final RecyclerView.ViewHolder vh = shots.findViewHolderForAdapterPosition(0);
+                if (vh == null) return false;
+                final int firstTop = vh.itemView.getTop();
                 if (event.getY() < firstTop) {
                      return playerDescription.dispatchTouchEvent(event);
                 }
@@ -242,47 +265,10 @@ public class PlayerActivity extends Activity {
         }
 
         if (player.shots_count > 0) {
-            dataManager.loadMore(); // kick off initial load
+            dataManager.loadData(); // kick off initial load
         } else {
-            // todo show empty text
+            loading.setVisibility(View.GONE);
         }
-    }
-
-    private void setupSharedEnter() {
-        setEnterSharedElementCallback(new SharedElementCallback() {
-            private float finalSize;
-            private int finalPaddingStart;
-
-            @Override
-            public void onSharedElementStart(List<String> sharedElementNames, List<View>
-                    sharedElements, List<View> sharedElementSnapshots) {
-                finalSize = playerName.getTextSize();
-                finalPaddingStart = playerName.getPaddingStart();
-                playerName.setTextSize(14);
-                ViewUtils.setPaddingStart(playerName, 0);
-                forceSharedElementLayout();
-            }
-
-            @Override
-            public void onSharedElementEnd(List<String> sharedElementNames, List<View>
-                    sharedElements, List<View> sharedElementSnapshots) {
-                playerName.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalSize);
-                ViewUtils.setPaddingStart(playerName, finalPaddingStart);
-                forceSharedElementLayout();
-            }
-
-            private void forceSharedElementLayout() {
-                playerName.measure(
-                        View.MeasureSpec.makeMeasureSpec(playerName.getWidth(),
-                                View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(playerName.getHeight(),
-                                View.MeasureSpec.EXACTLY));
-                playerName.layout(playerName.getLeft(),
-                        playerName.getTop(),
-                        playerName.getRight(),
-                        playerName.getBottom());
-            }
-        });
     }
 
     private void loadPlayer(long userId) {
@@ -321,9 +307,13 @@ public class PlayerActivity extends Activity {
                 .create((DribbbleService.class));
     }
 
-    private void setFollowerCount() {
+    private void setFollowerCount(int count) {
+        followerCount = count;
         followersCount.setText(getResources().getQuantityString(R.plurals.follower_count,
                 followerCount, NumberFormat.getInstance().format(followerCount)));
+        if (followerCount == 0) {
+            followersCount.setBackground(null);
+        }
     }
 
     @OnClick(R.id.follow)
@@ -339,8 +329,7 @@ public class PlayerActivity extends Activity {
                 TransitionManager.beginDelayedTransition(playerDescription);
                 follow.setText(R.string.follow);
                 follow.setActivated(false);
-                followerCount--;
-                setFollowerCount();
+                setFollowerCount(followerCount - 1);
             } else {
                 dataManager.getDribbbleApi().follow(player.id, "", new Callback<Void>() {
                     @Override public void success(Void voyd, Response response) { }
@@ -351,8 +340,7 @@ public class PlayerActivity extends Activity {
                 TransitionManager.beginDelayedTransition(playerDescription);
                 follow.setText(R.string.following);
                 follow.setActivated(true);
-                followerCount++;
-                setFollowerCount();
+                setFollowerCount(followerCount + 1);
             }
         } else {
             Intent login = new Intent(this, DribbbleLogin.class);
@@ -363,6 +351,16 @@ public class PlayerActivity extends Activity {
             ActivityOptions options = ActivityOptions.makeSceneTransitionAnimation
                     (this, follow, getString(R.string.transition_dribbble_login));
             startActivity(login, options.toBundle());
+        }
+    }
+
+    @OnClick({R.id.shot_count, R.id.followers_count, R.id.likes_count })
+    /* package */ void playerActionClick(TextView view) {
+        ((AnimatedVectorDrawable) view.getCompoundDrawables()[1]).start();
+        switch (view.getId()) {
+            case R.id.followers_count:
+                PlayerSheet.start(PlayerActivity.this, player);
+                break;
         }
     }
 

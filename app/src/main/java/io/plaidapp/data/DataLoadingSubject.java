@@ -21,8 +21,8 @@ package io.plaidapp.data;
  */
 public interface DataLoadingSubject {
     boolean isDataLoading();
-    void addCallbacks(DataLoadingCallbacks callbacks);
-    void removeCallbacks(DataLoadingCallbacks callbacks);
+    void registerCallback(DataLoadingCallbacks callbacks);
+    void unregisterCallback(DataLoadingCallbacks callbacks);
 
     interface DataLoadingCallbacks {
         void dataStartedLoading();

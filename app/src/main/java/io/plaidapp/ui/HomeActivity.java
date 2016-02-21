@@ -50,11 +50,11 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewAnimationUtils;
 import android.view.ViewGroup;
 import android.view.ViewStub;
 import android.view.WindowInsets;
 import android.view.animation.AnimationUtils;
-import android.view.animation.Interpolator;
 import android.widget.ActionMenuView;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
@@ -88,6 +88,7 @@ import io.plaidapp.ui.recyclerview.FilterTouchHelperCallback;
 import io.plaidapp.ui.recyclerview.GridItemDividerDecoration;
 import io.plaidapp.ui.recyclerview.InfiniteScrollListener;
 import io.plaidapp.ui.transitions.FabDialogMorphSetup;
+import io.plaidapp.util.AnimUtils;
 import io.plaidapp.util.ViewUtils;
 
 
@@ -167,7 +168,7 @@ public class HomeActivity extends Activity {
             }
         });
         grid.setLayoutManager(layoutManager);
-        grid.addOnScrollListener(gridScroll);
+        grid.addOnScrollListener(toolbarElevation);
         grid.addOnScrollListener(new InfiniteScrollListener(layoutManager, dataManager) {
             @Override
             public void onLoadMore() {
@@ -195,7 +196,7 @@ public class HomeActivity extends Activity {
                         insets.getSystemWindowInsetTop() + ViewUtils.getActionBarSize
                                 (HomeActivity.this),
                         grid.getPaddingRight() + insets.getSystemWindowInsetRight(), // landscape
-                        grid.getPaddingBottom());
+                        grid.getPaddingBottom() + insets.getSystemWindowInsetBottom());
 
                 // inset the fab for the navbar
                 ViewGroup.MarginLayoutParams lpFab = (ViewGroup.MarginLayoutParams) fab
@@ -238,8 +239,7 @@ public class HomeActivity extends Activity {
 
         filtersList.setAdapter(filtersAdapter);
         filtersList.setItemAnimator(new FilterAdapter.FilterAnimator());
-        filtersAdapter.addFilterChangedListener(filtersChangedListener);
-        filtersAdapter.addFilterChangedListener(dataManager);
+        filtersAdapter.registerFilterChangedCallback(filtersChangedCallbacks);
         dataManager.loadAllDataSources();
         ItemTouchHelper.Callback callback = new FilterTouchHelperCallback(filtersAdapter);
         ItemTouchHelper itemTouchHelper = new ItemTouchHelper(callback);
@@ -249,8 +249,8 @@ public class HomeActivity extends Activity {
     }
 
     // listener for notifying adapter when data sources are deactivated
-    private FilterAdapter.FiltersChangedListener filtersChangedListener =
-            new FilterAdapter.FiltersChangedListener() {
+    private FilterAdapter.FiltersChangedCallbacks filtersChangedCallbacks =
+            new FilterAdapter.FiltersChangedCallbacks() {
         @Override
         public void onFiltersChanged(Source changedFilter) {
             if (!changedFilter.active) {
@@ -266,15 +266,23 @@ public class HomeActivity extends Activity {
         }
     };
 
-    private int gridScrollY = 0;
-    private RecyclerView.OnScrollListener gridScroll = new RecyclerView.OnScrollListener() {
+    private RecyclerView.OnScrollListener toolbarElevation = new RecyclerView.OnScrollListener() {
         @Override
-        public void onScrolled(RecyclerView recyclerView, int dx, int dy) {
-            gridScrollY += dy;
-            if (gridScrollY > 0 && toolbar.getTranslationZ() != -1f) {
-                toolbar.setTranslationZ(-1f);
-            } else if (gridScrollY == 0 && toolbar.getTranslationZ() != 0) {
+        public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
+            // we want the grid to scroll over the top of the toolbar but for the toolbar items
+            // to be clickable when visible. To achieve this we play games with elevation. The
+            // toolbar is laid out in front of the grid but when we scroll, we lower it's elevation
+            // to allow the content to pass in front (and reset when scrolled to top of the grid)
+            if (newState == RecyclerView.SCROLL_STATE_IDLE
+                    && layoutManager.findFirstVisibleItemPosition() == 0
+                    && layoutManager.findViewByPosition(0).getTop() == grid.getPaddingTop()
+                    && toolbar.getTranslationZ() != 0) {
+                // at top, reset elevation
                 toolbar.setTranslationZ(0f);
+            } else if (newState == RecyclerView.SCROLL_STATE_DRAGGING
+                    && toolbar.getTranslationZ() != -1f) {
+                // grid scrolled, lower toolbar to allow content to pass in front
+                toolbar.setTranslationZ(-1f);
             }
         }
     };
@@ -315,7 +323,6 @@ public class HomeActivity extends Activity {
                         @Override
                         public void run() {
                             fabPosting.setVisibility(View.GONE);
-                            fab.setVisibility(View.VISIBLE);
                         }
                     }, 2100); // length of R.drawable.avd_upload_complete
 
@@ -333,16 +340,11 @@ public class HomeActivity extends Activity {
                     fabPosting.animate()
                             .alpha(0f)
                             .rotation(90f)
-                            .setStartDelay(2000L) // leave error on screen for a while before hiding
-                            .setDuration(200L)
-                            .setInterpolator(AnimationUtils.loadInterpolator(
-                                    HomeActivity.this, android.R.interpolator.fast_out_linear_in))
+                            .setStartDelay(2000L) // leave error on screen briefly
+                            .setDuration(300L)
+                            .setInterpolator(AnimUtils.getFastOutSlowInInterpolator(HomeActivity
+                                    .this))
                             .setListener(new AnimatorListenerAdapter() {
-                                @Override
-                                public void onAnimationStart(Animator animation) {
-                                    fab.setVisibility(View.VISIBLE);
-                                }
-
                                 @Override
                                 public void onAnimationEnd(Animator animation) {
                                     fabPosting.setVisibility(View.GONE);
@@ -370,8 +372,31 @@ public class HomeActivity extends Activity {
 
     private void showPostingProgress() {
         ensurePostingProgressInflated();
-        fab.setVisibility(View.INVISIBLE);
         fabPosting.setVisibility(View.VISIBLE);
+        // if stub has just been inflated then it will not have been laid out yet
+        if (fabPosting.isLaidOut()) {
+            revealPostingProgress();
+        } else {
+            fabPosting.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b,
+                                           int oldL, int oldT, int oldR, int oldB) {
+                    fabPosting.removeOnLayoutChangeListener(this);
+                    revealPostingProgress();
+                }
+            });
+        }
+    }
+
+    private void revealPostingProgress() {
+        Animator reveal = ViewAnimationUtils.createCircularReveal(fabPosting,
+                (int) fabPosting.getPivotX(),
+                (int) fabPosting.getPivotY(),
+                0f,
+                fabPosting.getWidth() / 2)
+                .setDuration(600L);
+        reveal.setInterpolator(AnimUtils.getFastOutLinearInInterpolator(this));
+        reveal.start();
         AnimatedVectorDrawable uploading =
                 (AnimatedVectorDrawable) getDrawable(R.drawable.avd_uploading);
         fabPosting.setImageDrawable(uploading);
@@ -393,8 +418,6 @@ public class HomeActivity extends Activity {
                 loading.setVisibility(View.GONE);
                 setNoFiltersEmptyTextVisibility(View.VISIBLE);
             }
-            // ensure grid scroll tracking/toolbar z-order is reset
-            gridScrollY = 0;
             toolbar.setTranslationZ(0f);
         } else {
             loading.setVisibility(View.GONE);
@@ -485,8 +508,7 @@ public class HomeActivity extends Activity {
                     .scaleX(1f)
                     .setStartDelay(300)
                     .setDuration(900)
-                    .setInterpolator(AnimationUtils.loadInterpolator(this,
-                            android.R.interpolator.fast_out_slow_in));
+                    .setInterpolator(AnimUtils.getFastOutSlowInInterpolator(this));
         }
         View amv = toolbar.getChildAt(1);
         if (amv != null & amv instanceof ActionMenuView) {
@@ -508,8 +530,8 @@ public class HomeActivity extends Activity {
                     .scaleY(1f)
                     .setStartDelay(startDelay)
                     .setDuration(duration)
-                    .setInterpolator(AnimationUtils.loadInterpolator(this, android.R.interpolator
-                            .overshoot));
+                    .setInterpolator(AnimationUtils.loadInterpolator(this,
+                            android.R.interpolator.overshoot));
         }
     }
 
@@ -658,8 +680,7 @@ public class HomeActivity extends Activity {
                 .scaleY(1f)
                 .translationY(0f)
                 .setDuration(300L)
-                .setInterpolator(AnimationUtils.loadInterpolator(this, android.R.interpolator
-                        .linear_out_slow_in))
+                .setInterpolator(AnimUtils.getLinearOutSlowInInterpolator(this))
                 .start();
     }
 

@@ -28,6 +28,7 @@ import android.app.assist.AssistContent;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Path;
+import android.graphics.drawable.AnimatedVectorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -52,7 +53,6 @@ import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewAnimationUtils;
 import android.view.ViewGroup;
-import android.view.animation.AnimationUtils;
 import android.view.animation.Interpolator;
 import android.widget.Button;
 import android.widget.EditText;
@@ -105,6 +105,10 @@ import retrofit.RestAdapter;
 import retrofit.RetrofitError;
 import retrofit.client.Response;
 
+import static io.plaidapp.util.AnimUtils.getFastOutLinearInInterpolator;
+import static io.plaidapp.util.AnimUtils.getFastOutSlowInInterpolator;
+import static io.plaidapp.util.AnimUtils.getLinearOutSlowInInterpolator;
+
 public class DesignerNewsStory extends Activity {
 
     protected static final String EXTRA_STORY = "story";
@@ -144,12 +148,7 @@ public class DesignerNewsStory extends Activity {
         story = getIntent().getParcelableExtra(EXTRA_STORY);
         fab.setOnClickListener(fabClick);
 
-        chromeFader = new ElasticDragDismissFrameLayout.SystemChromeFader(getWindow()) {
-            @Override
-            public void onDragDismissed() {
-                finishAfterTransition();
-            }
-        };
+        chromeFader = new ElasticDragDismissFrameLayout.SystemChromeFader(this);
 
         markdown = new Bypass(this, new Bypass.Options()
                 .setBlockQuoteLineColor(
@@ -172,27 +171,20 @@ public class DesignerNewsStory extends Activity {
                 R.layout.designer_news_story_description, commentsList, false);
         bindDescription();
 
-        // setup toolbar
-        Toolbar toolbar = (Toolbar) findViewById(R.id.story_toolbar);
-        if (collapsingToolbar != null) { // portrait: collapsing toolbar
+        // setup title/toolbar
+        if (collapsingToolbar != null) { // narrow device: collapsing toolbar
             collapsingToolbar.addOnLayoutChangeListener(titlebarLayout);
             collapsingToolbar.setTitle(story.title);
-        } else { // landscape: scroll toolbar with content
-            toolbar = (Toolbar) header.findViewById(R.id.story_toolbar);
-            FontTextView title = (FontTextView) toolbar.findViewById(R.id.story_title);
+            final Toolbar toolbar = (Toolbar) findViewById(R.id.story_toolbar);
+            toolbar.setNavigationOnClickListener(backClick);
+            commentsList.addOnScrollListener(headerScrollListener);
+        } else { // w600dp configuration: content card scrolls over title bar
+            final TextView title = (TextView) findViewById(R.id.story_title);
             title.setText(story.title);
+            findViewById(R.id.back).setOnClickListener(backClick);
         }
-        commentsList.addOnScrollListener(headerScrollListener);
 
-        toolbar.setNavigationOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                finishAfterTransition();
-            }
-        });
-
-        View enterCommentView = setupCommentField();
-
+        final View enterCommentView = setupCommentField();
         if (story.comment_count > 0) {
             // flatten the comments from a nested structure {@see Comment#comments} to a
             // list appropriate for our adapter (using the depth attribute).
@@ -289,11 +281,18 @@ public class DesignerNewsStory extends Activity {
         @Override public void onCustomTabsDisconnected() { }
     };
 
-    private RecyclerView.OnScrollListener headerScrollListener
+    private final RecyclerView.OnScrollListener headerScrollListener
             = new RecyclerView.OnScrollListener() {
         @Override
         public void onScrolled(RecyclerView recyclerView, int dx, int dy) {
             updateScrollDependentUi();
+        }
+    };
+
+    private final View.OnClickListener backClick = new View.OnClickListener() {
+        @Override
+        public void onClick(View view) {
+            finishAfterTransition();
         }
     };
 
@@ -332,8 +331,7 @@ public class DesignerNewsStory extends Activity {
                     .scaleY(0f)
                     .alpha(0.6f)
                     .setDuration(200L)
-                    .setInterpolator(AnimationUtils.loadInterpolator(this,
-                            android.R.interpolator.fast_out_linear_in))
+                    .setInterpolator(getFastOutLinearInInterpolator(this))
                     .withLayer()
                     .setListener(postHideFab)
                     .start();
@@ -344,8 +342,7 @@ public class DesignerNewsStory extends Activity {
                     .scaleY(1f)
                     .alpha(1f)
                     .setDuration(200L)
-                    .setInterpolator(AnimationUtils.loadInterpolator(this,
-                            android.R.interpolator.linear_out_slow_in))
+                    .setInterpolator(getLinearOutSlowInInterpolator(this))
                     .withLayer()
                     .setListener(preShowFab)
                     .start();
@@ -449,8 +446,7 @@ public class DesignerNewsStory extends Activity {
 
         // play 'em all together with the material interpolator
         AnimatorSet show = new AnimatorSet();
-        show.setInterpolator(AnimationUtils.loadInterpolator(DesignerNewsStory.this,
-                android.R.interpolator.fast_out_slow_in));
+        show.setInterpolator(getFastOutSlowInInterpolator(DesignerNewsStory.this));
         show.playTogether(reveal, background, position, fadeOutFab);
         show.start();
     }
@@ -458,8 +454,8 @@ public class DesignerNewsStory extends Activity {
     private void bindDescription() {
         final TextView storyComment = (TextView) header.findViewById(R.id.story_comment);
         if (!TextUtils.isEmpty(story.comment)) {
-            HtmlUtils.setTextWithNiceLinks(storyComment, markdown.markdownToSpannable(story
-                    .comment, storyComment, new Bypass.LoadImageCallback() {
+            HtmlUtils.parseMarkdownAndSetText(storyComment, story.comment, markdown,
+                    new Bypass.LoadImageCallback() {
                 @Override
                 public void loadImage(String src, ImageLoadingSpan loadingSpan) {
                     Glide.with(DesignerNewsStory.this)
@@ -468,7 +464,7 @@ public class DesignerNewsStory extends Activity {
                             .diskCacheStrategy(DiskCacheStrategy.ALL)
                             .into(new ImageSpanTarget(storyComment, loadingSpan));
                 }
-            }));
+            });
         } else {
             storyComment.setVisibility(View.GONE);
         }
@@ -483,10 +479,11 @@ public class DesignerNewsStory extends Activity {
             }
         });
 
-        Button share = (Button) header.findViewById(R.id.story_share_action);
+        final Button share = (Button) header.findViewById(R.id.story_share_action);
         share.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                ((AnimatedVectorDrawable) share.getCompoundDrawables()[1]).start();
                 startActivity(ShareCompat.IntentBuilder.from(DesignerNewsStory.this)
                         .setText(story.url)
                         .setType("text/plain")
@@ -815,18 +812,18 @@ public class DesignerNewsStory extends Activity {
                     !(partialChanges.contains(CommentAnimator.COLLAPSE_COMMENT)
                         || partialChanges.contains(CommentAnimator.EXPAND_COMMENT))) {
 
-                Comment comment = getComment(holder.getAdapterPosition());
-                HtmlUtils.setTextWithNiceLinks(holder.comment, markdown.markdownToSpannable(
-                        comment.body, holder.comment, new Bypass.LoadImageCallback() {
-                            @Override
-                            public void loadImage(String src, ImageLoadingSpan loadingSpan) {
-                                Glide.with(DesignerNewsStory.this)
-                                        .load(src)
-                                        .asBitmap()
-                                        .diskCacheStrategy(DiskCacheStrategy.ALL)
-                                        .into(new ImageSpanTarget(holder.comment, loadingSpan));
-                            }
-                        }));
+                final Comment comment = getComment(holder.getAdapterPosition());
+                HtmlUtils.parseMarkdownAndSetText(holder.comment, comment.body, markdown,
+                        new Bypass.LoadImageCallback() {
+                    @Override
+                    public void loadImage(String src, ImageLoadingSpan loadingSpan) {
+                        Glide.with(DesignerNewsStory.this)
+                                .load(src)
+                                .asBitmap()
+                                .diskCacheStrategy(DiskCacheStrategy.ALL)
+                                .into(new ImageSpanTarget(holder.comment, loadingSpan));
+                    }
+                });
                 holder.author.setText(comment.user_display_name);
                 holder.author.setOriginalPoster(isOP(comment.user_id));
                 if (comment.created_at != null) {
@@ -945,9 +942,8 @@ public class DesignerNewsStory extends Activity {
                 @Override
                 public void onFocusChange(View v, boolean hasFocus) {
                     replyToCommentFocused = hasFocus;
-                    final Interpolator interp = AnimationUtils.loadInterpolator(
-                            holder.itemView.getContext(),
-                            android.R.interpolator.fast_out_slow_in);
+                    final Interpolator interp = getFastOutSlowInInterpolator(holder
+                            .itemView.getContext());
                     if (hasFocus) {
                         holder.commentVotes.animate()
                                 .translationX(-holder.commentVotes.getWidth())
@@ -1105,8 +1101,8 @@ public class DesignerNewsStory extends Activity {
                                 .getMarginEnd());
 
                 if (info.doExpand) {
-                    Interpolator moveInterpolator = AnimationUtils.loadInterpolator(
-                            holder.itemView.getContext(), android.R.interpolator.fast_out_slow_in);
+                    Interpolator moveInterpolator = getFastOutSlowInInterpolator(holder
+                            .itemView.getContext());
                     holder.threadDepth.setTranslationX(0f);
                     holder.threadDepth.animate()
                             .translationX(expandedThreadOffset)
@@ -1137,10 +1133,12 @@ public class DesignerNewsStory extends Activity {
                                 }
                             });
                 } else if (info.doCollapse) {
-                    Interpolator enterInterpolator = AnimationUtils.loadInterpolator(holder.itemView
-                            .getContext(), android.R.interpolator.linear_out_slow_in);
-                    Interpolator moveInterpolator = AnimationUtils.loadInterpolator(holder.itemView
-                            .getContext(), android.R.interpolator.fast_out_slow_in);
+                    Interpolator enterInterpolator = getLinearOutSlowInInterpolator
+                            (holder.itemView
+                            .getContext());
+                    Interpolator moveInterpolator = getFastOutSlowInInterpolator(holder
+                            .itemView
+                            .getContext());
 
                     // return the thread depth indicator into place
                     holder.threadDepth.setTranslationX(expandedThreadOffset);

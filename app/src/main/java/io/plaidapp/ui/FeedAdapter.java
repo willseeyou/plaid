@@ -30,6 +30,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.TransitionDrawable;
 import android.net.Uri;
+import android.support.annotation.ColorInt;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.customtabs.CustomTabsIntent;
@@ -42,7 +43,6 @@ import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.AnimationUtils;
 import android.widget.ImageButton;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -55,7 +55,6 @@ import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.target.Target;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -64,11 +63,16 @@ import butterknife.ButterKnife;
 import io.plaidapp.R;
 import io.plaidapp.data.DataLoadingSubject;
 import io.plaidapp.data.PlaidItem;
-import io.plaidapp.data.PlaidItemComparator;
+import io.plaidapp.data.PlaidItemSorting;
+import io.plaidapp.data.api.designernews.StoryWeigher;
 import io.plaidapp.data.api.designernews.model.Story;
+import io.plaidapp.data.api.dribbble.PlayerShotsDataManager;
+import io.plaidapp.data.api.dribbble.ShotWeigher;
 import io.plaidapp.data.api.dribbble.model.Shot;
+import io.plaidapp.data.api.producthunt.PostWeigher;
 import io.plaidapp.data.api.producthunt.model.Post;
 import io.plaidapp.data.pocket.PocketUtils;
+import io.plaidapp.data.prefs.SourceManager;
 import io.plaidapp.ui.widget.BadgedFourThreeImageView;
 import io.plaidapp.util.AnimUtils;
 import io.plaidapp.util.ObservableColorMatrix;
@@ -76,13 +80,13 @@ import io.plaidapp.util.ViewUtils;
 import io.plaidapp.util.customtabs.CustomTabActivityHelper;
 import io.plaidapp.util.glide.DribbbleTarget;
 
+import static io.plaidapp.util.AnimUtils.getFastOutSlowInInterpolator;
+
 /**
- * Adapter for the main screen grid of items
+ * Adapter for displaying a grid of {@link PlaidItem}s.
  */
 public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
                          implements DataLoadingSubject.DataLoadingCallbacks {
-
-    public static final float DUPE_WEIGHT_BOOST = 0.4f;
 
     private static final int TYPE_DESIGNER_NEWS_STORY = 0;
     private static final int TYPE_DRIBBBLE_SHOT = 1;
@@ -92,42 +96,52 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
     // we need to hold on to an activity ref for the shared element transitions :/
     private final Activity host;
     private final LayoutInflater layoutInflater;
-    private final PlaidItemComparator comparator;
+    private final PlaidItemSorting.PlaidItemComparator comparator;
     private final boolean pocketIsInstalled;
-    private @Nullable DataLoadingSubject dataLoading;
+    private final @Nullable DataLoadingSubject dataLoading;
     private final int columns;
     private final ColorDrawable[] shotLoadingPlaceholders;
+    private final @ColorInt int initialGifBadgeColor;
 
     private List<PlaidItem> items;
-
-    public FeedAdapter(Activity hostActivity,
-                       DataLoadingSubject dataLoading,
-                       int columns,
-                       boolean pocketInstalled,
-                       boolean dark) {
-        this.host = hostActivity;
-        this.dataLoading = dataLoading;
-        dataLoading.addCallbacks(this);
-        this.columns = columns;
-        this.pocketIsInstalled = pocketInstalled;
-        layoutInflater = LayoutInflater.from(host);
-        comparator = new PlaidItemComparator();
-        items = new ArrayList<>();
-        setHasStableIds(true);
-        TypedArray placeholderColors = hostActivity.getResources().obtainTypedArray(
-                dark ? R.array.loading_placeholders_dark : R.array.loading_placeholders_light);
-        shotLoadingPlaceholders = new ColorDrawable[placeholderColors.length()];
-        for (int i = 0; i < placeholderColors.length(); i++) {
-            shotLoadingPlaceholders[i] = new ColorDrawable(
-                    placeholderColors.getColor(i, Color.DKGRAY));
-        }
-    }
+    private boolean showLoadingMore = false;
+    private PlaidItemSorting.NaturalOrderWeigher naturalOrderWeigher;
+    private ShotWeigher shotWeigher;
+    private StoryWeigher storyWeigher;
+    private PostWeigher postWeigher;
 
     public FeedAdapter(Activity hostActivity,
                        DataLoadingSubject dataLoading,
                        int columns,
                        boolean pocketInstalled) {
-        this(hostActivity, dataLoading, columns, pocketInstalled, true);
+        this.host = hostActivity;
+        this.dataLoading = dataLoading;
+        dataLoading.registerCallback(this);
+        this.columns = columns;
+        this.pocketIsInstalled = pocketInstalled;
+        layoutInflater = LayoutInflater.from(host);
+        comparator = new PlaidItemSorting.PlaidItemComparator();
+        items = new ArrayList<>();
+        setHasStableIds(true);
+
+        // get the dribbble shot placeholder colors & badge color from the theme
+        final TypedArray a = host.obtainStyledAttributes(R.styleable.DribbbleFeed);
+        final int loadingColorArrayId =
+                a.getResourceId(R.styleable.DribbbleFeed_shotLoadingPlaceholderColors, 0);
+        if (loadingColorArrayId != 0) {
+            int[] placeholderColors = host.getResources().getIntArray(loadingColorArrayId);
+            shotLoadingPlaceholders = new ColorDrawable[placeholderColors.length];
+            for (int i = 0; i < placeholderColors.length; i++) {
+                shotLoadingPlaceholders[i] = new ColorDrawable(placeholderColors[i]);
+            }
+        } else {
+            shotLoadingPlaceholders = new ColorDrawable[] { new ColorDrawable(Color.DKGRAY) };
+        }
+        final int initialGifBadgeColorId =
+                a.getResourceId(R.styleable.DribbbleFeed_initialBadgeColor, 0);
+        initialGifBadgeColor = initialGifBadgeColorId != 0 ?
+                ContextCompat.getColor(host, initialGifBadgeColorId) : 0x40ffffff;
+        a.recycle();
     }
 
     @Override
@@ -169,6 +183,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         if (holder instanceof DribbbleShotHolder) {
             // reset the badge & ripple which are dynamically determined
             DribbbleShotHolder shotHolder = (DribbbleShotHolder) holder;
+            shotHolder.image.setBadgeColor(initialGifBadgeColor);
             shotHolder.image.showBadge(false);
             shotHolder.image.setForeground(
                     ContextCompat.getDrawable(host, R.drawable.mid_grey_ripple));
@@ -232,18 +247,17 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
     private DribbbleShotHolder createDribbbleShotHolder(ViewGroup parent) {
         final DribbbleShotHolder holder = new DribbbleShotHolder(
                 layoutInflater.inflate(R.layout.dribbble_shot_item, parent, false));
+        holder.image.setBadgeColor(initialGifBadgeColor);
         holder.image.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                holder.itemView.setTransitionName(holder.itemView.getResources().getString(R
+                holder.image.setTransitionName(holder.itemView.getResources().getString(R
                         .string.transition_shot));
-                holder.itemView.setBackgroundColor(
-                        ContextCompat.getColor(host, R.color.background_light));
                 Intent intent = new Intent();
                 intent.setClass(host, DribbbleShot.class);
                 intent.putExtra(DribbbleShot.EXTRA_SHOT,
                         (Shot) getItem(holder.getAdapterPosition()));
-                setGridItemContentTransitions(holder.itemView);
+                setGridItemContentTransitions(holder.image);
                 ActivityOptions options =
                         ActivityOptions.makeSceneTransitionAnimation(host,
                                 Pair.create(view, host.getString(R.string.transition_shot)),
@@ -311,8 +325,8 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
                         if (!shot.hasFadedIn) {
                             holder.image.setHasTransientState(true);
                             final ObservableColorMatrix cm = new ObservableColorMatrix();
-                            ObjectAnimator saturation = ObjectAnimator.ofFloat(cm,
-                                    ObservableColorMatrix.SATURATION, 0f, 1f);
+                            final ObjectAnimator saturation = ObjectAnimator.ofFloat(
+                                    cm, ObservableColorMatrix.SATURATION, 0f, 1f);
                             saturation.addUpdateListener(new ValueAnimator.AnimatorUpdateListener
                                     () {
                                 @Override
@@ -320,18 +334,15 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
                                     // just animating the color matrix does not invalidate the
                                     // drawable so need this update listener.  Also have to create a
                                     // new CMCF as the matrix is immutable :(
-                                    if (holder.image.getDrawable() != null) {
-                                        holder.image.getDrawable().setColorFilter(
-                                                new ColorMatrixColorFilter(cm));
-                                    }
+                                    holder.image.setColorFilter(new ColorMatrixColorFilter(cm));
                                 }
                             });
-                            saturation.setDuration(2000);
-                            saturation.setInterpolator(AnimationUtils.loadInterpolator(host,
-                                    android.R.interpolator.fast_out_slow_in));
+                            saturation.setDuration(2000L);
+                            saturation.setInterpolator(getFastOutSlowInInterpolator(host));
                             saturation.addListener(new AnimatorListenerAdapter() {
                                 @Override
                                 public void onAnimationEnd(Animator animation) {
+                                    holder.image.clearColorFilter();
                                     holder.image.setHasTransientState(false);
                                 }
                             });
@@ -353,6 +364,10 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
                 .fitCenter()
                 .override(imageSize[0], imageSize[1])
                 .into(new DribbbleTarget(holder.image, false));
+        // need both placeholder & background to prevent seeing through shot as it fades in
+        holder.image.setBackground(shotLoadingPlaceholders[holder.getAdapterPosition() %
+                shotLoadingPlaceholders.length]);
+        holder.image.showBadge(shot.animated);
     }
 
     @NonNull
@@ -426,44 +441,95 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         }
     }
 
-    private void add(PlaidItem item) {
-        items.add(item);
-    }
-
     public void clear() {
         items.clear();
         notifyDataSetChanged();
     }
 
-    public void addAndResort(Collection<? extends PlaidItem> newItems) {
-        // de-dupe results as the same item can be returned by multiple feeds
-        boolean add = true;
+    /**
+     * Main entry point for adding items to this adapter. Takes care of de-duplicating items and
+     * sorting them (depending on the data source). Will also expand some items to span multiple
+     * grid columns.
+     */
+    public void addAndResort(List<? extends PlaidItem> newItems) {
+        weighItems(newItems);
+        deduplicateAndAdd(newItems);
+        sort();
+        expandPopularItems();
+        notifyDataSetChanged();
+    }
+
+    /**
+     * Calculate a 'weight' [0, 1] for each data type for sorting. Each data type/source has a
+     * different metric for weighing it e.g. Dribbble uses likes etc. but some sources should keep
+     * the order returned by the API. Weights are 'scoped' to the page they belong to and lower
+     * weights are sorted earlier in the grid (i.e. in ascending weight).
+     */
+    private void weighItems(List<? extends PlaidItem> items) {
+        if (items == null || items.isEmpty()) return;
+
+        PlaidItemSorting.PlaidItemGroupWeigher weigher = null;
+        switch (items.get(0).dataSource) {
+            // some sources should just use the natural order i.e. as returned by the API as users
+            // have an expectation about the order they appear in
+            case SourceManager.SOURCE_DRIBBBLE_USER_SHOTS:
+            case SourceManager.SOURCE_DRIBBBLE_USER_LIKES:
+            case SourceManager.SOURCE_PRODUCT_HUNT:
+            case PlayerShotsDataManager.SOURCE_PLAYER_SHOTS:
+            case PlayerShotsDataManager.SOURCE_TEAM_SHOTS:
+                if (naturalOrderWeigher == null) {
+                    naturalOrderWeigher = new PlaidItemSorting.NaturalOrderWeigher();
+                }
+                weigher = naturalOrderWeigher;
+                break;
+            default:
+                // otherwise use our own weight calculation. We prefer this as it leads to a less
+                // regular pattern of items in the grid
+                if (items.get(0) instanceof Shot) {
+                    if (shotWeigher == null) shotWeigher = new ShotWeigher();
+                    weigher = shotWeigher;
+                } else if (items.get(0) instanceof Story) {
+                    if (storyWeigher == null) storyWeigher = new StoryWeigher();
+                    weigher = storyWeigher;
+                } else if (items.get(0) instanceof Post) {
+                    if (postWeigher == null) postWeigher = new PostWeigher();
+                    weigher = postWeigher;
+                }
+        }
+        weigher.weigh(items);
+    }
+
+    /**
+     * De-dupe as the same item can be returned by multiple feeds
+     */
+    private void deduplicateAndAdd(List<? extends PlaidItem> newItems) {
+        final int count = getDataItemCount();
         for (PlaidItem newItem : newItems) {
-            int count = getDataItemCount();
+            boolean add = true;
             for (int i = 0; i < count; i++) {
                 PlaidItem existingItem = getItem(i);
                 if (existingItem.equals(newItem)) {
-                    // if we find a dupe mark the weight boost field on the first-in, but don't add
-                    // the dupe. We use the fact that an item comes from multiple sources to indicate it
-                    // is more important and sort it higher
-                    existingItem.weightBoost = DUPE_WEIGHT_BOOST;
                     add = false;
                     break;
                 }
             }
             if (add) {
                 add(newItem);
-                add = true;
             }
         }
-        sort();
-        expandPopularItems();
+    }
+
+    private void add(PlaidItem item) {
+        items.add(item);
+    }
+
+    private void sort() {
+        Collections.sort(items, comparator); // sort by weight
     }
 
     private void expandPopularItems() {
         // for now just expand the first dribbble image per page which should be
-        // the most popular according to #sort.
-        // TODO make this smarter & handle other item types
+        // the most popular according to our weighing & sorting
         List<Integer> expandedPositions = new ArrayList<>();
         int page = -1;
         final int count = items.size();
@@ -493,61 +559,15 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         }
     }
 
-    protected void sort() {
-        // calculate the 'weight' for each data type and then sort by that. Each data type has a
-        // different metric for weighing it e.g. Dribbble uses likes etc. Weights are 'scoped' to
-        // the page they belong to and lower weights are sorted higher in the grid.
-        int count = getDataItemCount();
-        int maxDesignNewsVotes = 0;
-        int maxDesignNewsComments = 0;
-        long maxDribbleLikes = 0;
-        int maxProductHuntVotes = 0;
-        int maxProductHuntComments = 0;
-
-        // work out some maximum values to weigh individual items against
-        for (int i = 0; i < count; i++) {
-            PlaidItem item = getItem(i);
-            if (item instanceof Story) {
-                maxDesignNewsComments = Math.max(((Story) item).comment_count,
-                        maxDesignNewsComments);
-                maxDesignNewsVotes = Math.max(((Story) item).vote_count, maxDesignNewsVotes);
-            } else if (item instanceof Shot) {
-                maxDribbleLikes = Math.max(((Shot) item).likes_count, maxDribbleLikes);
-            } else if (item instanceof Post) {
-                maxProductHuntComments = Math.max(((Post) item).comments_count,
-                        maxProductHuntComments);
-                maxProductHuntVotes = Math.max(((Post) item).votes_count, maxProductHuntVotes);
-            }
-        }
-
-        // now go through and set the weight of each item
-        for (int i = 0; i < count; i++) {
-            PlaidItem item = getItem(i);
-            if (item instanceof Story) {
-                ((Story) item).weigh(maxDesignNewsComments, maxDesignNewsVotes);
-            } else if (item instanceof Shot) {
-                ((Shot) item).weigh(maxDribbleLikes);
-            } else if (item instanceof Post) {
-                ((Post) item).weigh(maxProductHuntComments, maxProductHuntVotes);
-            }
-            // scope it to the page it came from
-            item.weight += item.page;
-        }
-
-        // sort by weight
-        Collections.sort(items, comparator);
-        notifyDataSetChanged(); // TODO call the more specific RV variants
-    }
-
     public void removeDataSource(String dataSource) {
-        int i = items.size() - 1;
-        while (i >= 0) {
+        for (int i = items.size() - 1; i >= 0; i--) {
             PlaidItem item = items.get(i);
             if (dataSource.equals(item.dataSource)) {
                 items.remove(i);
             }
-            i--;
         }
+        sort();
+        expandPopularItems();
         notifyDataSetChanged();
     }
 
@@ -561,7 +581,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
 
     @Override
     public int getItemCount() {
-        return getDataItemCount() + 1; // include loading footer
+        return getDataItemCount() + (showLoadingMore ? 1 : 0);
     }
 
     /**
@@ -576,7 +596,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         host.getWindow().setExitTransition(
                 ti.inflateTransition(R.transition.home_content_item_exit));
         final Transition reenter = ti.inflateTransition(R.transition.home_content_item_reenter);
-        // we only want this content transition in certain cases so clear it out after it's done.
+        // we only want these content transitions in certain cases so clear out when done.
         reenter.addListener(new AnimUtils.TransitionListenerAdapter() {
             @Override
             public void onTransitionEnd(Transition transition) {
@@ -591,6 +611,10 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         return items.size();
     }
 
+    private int getLoadingMoreItemPosition() {
+        return showLoadingMore ? getItemCount() - 1 : RecyclerView.NO_POSITION;
+    }
+
     /**
      * Which ViewHolder types require a divider decoration
      */
@@ -600,15 +624,20 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
 
     @Override
     public void dataStartedLoading() {
-        notifyItemChanged(getItemCount());
+        if (showLoadingMore) return;
+        showLoadingMore = true;
+        notifyItemInserted(getLoadingMoreItemPosition());
     }
 
     @Override
     public void dataFinishedLoading() {
-        notifyItemChanged(getItemCount());
+        if (!showLoadingMore) return;
+        final int loadingPos = getLoadingMoreItemPosition();
+        showLoadingMore = false;
+        notifyItemRemoved(loadingPos);
     }
 
-    /* package */ class DribbbleShotHolder extends RecyclerView.ViewHolder {
+    /* package */ static class DribbbleShotHolder extends RecyclerView.ViewHolder {
 
         BadgedFourThreeImageView image;
 
@@ -619,7 +648,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
 
     }
 
-    /* package */ class DesignerNewsStoryHolder extends RecyclerView.ViewHolder {
+    /* package */ static class DesignerNewsStoryHolder extends RecyclerView.ViewHolder {
 
         @Bind(R.id.story_title) TextView title;
         @Bind(R.id.story_comments) TextView comments;
@@ -632,7 +661,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         }
     }
 
-    /* package */ class ProductHuntStoryHolder extends RecyclerView.ViewHolder {
+    /* package */ static class ProductHuntStoryHolder extends RecyclerView.ViewHolder {
 
         @Bind(R.id.hunt_title) TextView title;
         @Bind(R.id.tagline) TextView tagline;
@@ -644,7 +673,7 @@ public class FeedAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder>
         }
     }
 
-    /* package */ class LoadingMoreHolder extends RecyclerView.ViewHolder {
+    /* package */ static class LoadingMoreHolder extends RecyclerView.ViewHolder {
 
         ProgressBar progress;
 

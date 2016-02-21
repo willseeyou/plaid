@@ -32,9 +32,11 @@
     <color name="text_disabled_light">#4dffffff</color> <!-- 30% -->
     <color name="ripple_light">#99ffffff</color>
     <color name="ripple_dark">@color/mid_grey</color>
-    <color name="background_light">#fafafa</color>
+    <color name="background_light">#fafafa</color> <!-- grey 50 -->
+    <color name="background_lightish">#e0e0e0</color> <!-- grey 300 -->
     <color name="background_dark">#ff333333</color>
     <color name="immersive_bars">#99000000</color>
+    <color name="light_immersive_bars">@color/immersive_bars</color>
     <color name="status_bar_back">#ff676767</color> <!-- this is blended with immersive_bars to produce the desired status bar color i.e. background_super_dark -->
     <color name="background_super_dark">#ff292929</color>
     <color name="scrim">#99323232</color>
@@ -46,6 +48,7 @@
     <color name="dark_icon">#99000000</color> <!-- 60% black-->
     <color name="dark_icon_half_alpha">#4d000000</color> <!-- 30% black-->
     <color name="dark_icon_on_primary">#ff2a6046</color> <!-- 60% black on @color/primary -->
+    <color name="inline_action_icon">#ff757575</color> <!-- grey 600 -->
     <color name="light_icon">#ffffffff</color>
     <color name="divider">#1f000000</color> <!-- 12% black -->
     <color name="page_indicator_dark">#80333333</color>
@@ -61,6 +64,8 @@
     <color name="designer_news">#03a9f4</color> <!--light blue 500 -->-->
     <color name="designer_news_dark">#039be5</color> <!-- light blue 600 -->
     <color name="designer_news_link_highlight">#b303a9f4</color>
+    <color name="designer_news_story_comment_background">@android:color/transparent</color>
+
 
     <color name="designer_news_super_dark">#000133</color>
     <color name="designer_news_quote_line">#ffeceef1</color>

@@ -28,7 +28,7 @@ import android.support.v7.widget.RecyclerView;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.AnimationUtils;
+import android.view.animation.LinearInterpolator;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -41,6 +41,7 @@ import io.plaidapp.data.Source;
 import io.plaidapp.data.prefs.DribbblePrefs;
 import io.plaidapp.data.prefs.SourceManager;
 import io.plaidapp.ui.recyclerview.ItemTouchHelperAdapter;
+import io.plaidapp.util.AnimUtils;
 import io.plaidapp.util.ColorUtils;
 import io.plaidapp.util.ViewUtils;
 
@@ -60,7 +61,7 @@ public class FilterAdapter extends RecyclerView.Adapter<FilterAdapter.FilterView
     private final List<Source> filters;
     private final FilterAuthoriser authoriser;
     private final Context context;
-    private @Nullable List<FiltersChangedListener> listeners;
+    private @Nullable List<FiltersChangedCallbacks> callbacks;
 
     public FilterAdapter(@NonNull Context context,
                          @NonNull List<Source> filters,
@@ -245,16 +246,16 @@ public class FilterAdapter extends RecyclerView.Adapter<FilterAdapter.FilterView
         return count;
     }
 
-    public void addFilterChangedListener(FiltersChangedListener listener) {
-        if (listeners == null) {
-            listeners = new ArrayList<>();
+    public void registerFilterChangedCallback(FiltersChangedCallbacks callback) {
+        if (callbacks == null) {
+            callbacks = new ArrayList<>();
         }
-        listeners.add(listener);
+        callbacks.add(callback);
     }
 
-    public void removeFilterChangedListener(FiltersChangedListener listener) {
-        if (listeners != null) {
-            listeners.remove(listener);
+    public void unregisterFilterChangedCallback(FiltersChangedCallbacks callback) {
+        if (callbacks != null && !callbacks.isEmpty()) {
+            callbacks.remove(callback);
         }
     }
 
@@ -265,24 +266,24 @@ public class FilterAdapter extends RecyclerView.Adapter<FilterAdapter.FilterView
     }
 
     private void dispatchFiltersChanged(Source filter) {
-        if (listeners != null) {
-            for (FiltersChangedListener listener : listeners) {
-                listener.onFiltersChanged(filter);
+        if (callbacks != null && !callbacks.isEmpty()) {
+            for (FiltersChangedCallbacks callback : callbacks) {
+                callback.onFiltersChanged(filter);
             }
         }
     }
 
     private void dispatchFilterRemoved(Source filter) {
-        if (listeners != null) {
-            for (FiltersChangedListener listener : listeners) {
-                listener.onFilterRemoved(filter);
+        if (callbacks != null && !callbacks.isEmpty()) {
+            for (FiltersChangedCallbacks callback : callbacks) {
+                callback.onFilterRemoved(filter);
             }
         }
     }
 
-    public interface FiltersChangedListener {
-        void onFiltersChanged(Source changedFilter);
-        void onFilterRemoved(Source removed);
+    public static abstract class FiltersChangedCallbacks {
+        public void onFiltersChanged(Source changedFilter) { }
+        public void onFilterRemoved(Source removed) { }
     }
 
     public static class FilterViewHolder extends RecyclerView.ViewHolder {
@@ -351,8 +352,8 @@ public class FilterAdapter extends RecyclerView.Adapter<FilterAdapter.FilterView
                                     info.doEnable ? FILTER_ICON_ENABLED_ALPHA :
                                             FILTER_ICON_DISABLED_ALPHA);
                     iconAlpha.setDuration(300L);
-                    iconAlpha.setInterpolator(AnimationUtils.loadInterpolator(
-                            holder.itemView.getContext(), android.R.interpolator.fast_out_slow_in));
+                    iconAlpha.setInterpolator(AnimUtils.getFastOutSlowInInterpolator(holder
+                            .itemView.getContext()));
                     iconAlpha.addListener(new AnimatorListenerAdapter() {
                         @Override
                         public void onAnimationStart(Animator animation) {
@@ -378,9 +379,7 @@ public class FilterAdapter extends RecyclerView.Adapter<FilterAdapter.FilterView
                             highlightColor,
                             fadeFromTo);
                     highlightBackground.setDuration(1000L);
-                    highlightBackground.setInterpolator(
-                            AnimationUtils.loadInterpolator(holder.itemView.getContext(),
-                            android.R.interpolator.linear));
+                    highlightBackground.setInterpolator(new LinearInterpolator());
                     highlightBackground.addListener(new AnimatorListenerAdapter() {
                         @Override
                         public void onAnimationStart(Animator animation) {
